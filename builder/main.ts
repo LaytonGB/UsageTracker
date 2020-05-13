@@ -1,19 +1,61 @@
+/* 
+*TODO 
+  - Create tracker creation system
+  - create tracker macro creator for +1
+
+  - Tracker "creation" command creates tracker
+    - List options:
+      - Name
+      - Notify (All | GMs | Script Activator)
+      - Update system (Milestone | Formula | List)
+      - View Formula Permissions (All | GMs | Creator)
+      - Pause at level
+      - Create "+1 Uses" Macro? (Yes | No)
+  - Tracker "view" command lists trackers
+    - Options to:
+      - View All (Name, Creator, Formula, Etc)
+      - View uses until next milestone (shows formula?)
+      - Pause / Play Tracking (GM only)
+      - Rename
+      - Remove (are you sure?)
+*/
+
 const UsageTracker = (function() {
   const version = '1.0.0';
 
   type StateVar =
     | 'default_notify'
-    | 'default_pause'
+    | 'default_pause_after_milestone'
     | 'default_update_method'
+    | 'default_formula_view_permissions'
+    | 'default_create_macro'
     | 'tracker';
+
+  type TrackerProperty =
+    | 'name'
+    | 'creator'
+    | 'notify'
+    | 'updateMethod'
+    | 'viewPerm'
+    | 'createdMacro';
+
+  interface TrackerObject {
+    name: string;
+    creator: string;
+    notify: string;
+    updateMethod: string;
+    viewPerm: string;
+    pauseAtLevel: boolean;
+    createdMacro: boolean;
+  }
 
   type ActiveValue = 'true' | 'false';
   function isActiveValue(val: string): val is ActiveValue {
     return ['true', 'false'].includes(val);
   }
 
-  type notifyValue = 'milestone' | 'list' | 'algorithm';
-  function isNotifyValue(val: string): val is notifyValue {
+  type NotifyValue = 'milestone' | 'list' | 'algorithm';
+  function isNotifyValue(val: string): val is NotifyValue {
     return ['milestone', 'list', 'algorithm'].includes(val);
   }
 
@@ -59,13 +101,22 @@ const UsageTracker = (function() {
       default: 'all'
     },
     {
-      name: 'default_pause',
+      name: 'default_update_method',
+      acceptables: ['milestone', 'list', 'algorithm'],
+      default: 'milestone'
+    },
+    {
+      name: 'default_formula_view_permissions',
+      acceptables: ['all', 'gm', 'creator'],
+      default: 'all'
+    },
+    {
+      name: 'default_pause_after_milestone',
       acceptables: ['false', 'true'],
       default: 'false'
     },
     {
-      name: 'default_update_method',
-      acceptables: ['milestone', 'list', 'algorithm']
+      name: 'default_create_macro'
     },
     {
       name: 'tracker',
@@ -92,10 +143,7 @@ const UsageTracker = (function() {
     const macroArr: MacroForm[] = [
       {
         name: 'CreateTracker',
-        action:
-          apiCall +
-          ' --new ?{Tracker Name} ?{Algorithm Type|' +
-          getUpdateMethod()
+        action: apiCall + ' --add ?{Name?}' + getUpdateDefaults()
       }
     ];
     macroArr.forEach((macro) => {
@@ -128,15 +176,44 @@ const UsageTracker = (function() {
       }
     });
 
-    function getUpdateMethod(): string {
-      return [
-        ...new Set([
-          getState('default_update_method'),
-          ...['milestone', 'list', 'algorithm']
-        ])
-      ].reduce((a, b) => {
-        return a + '|' + b;
-      });
+    function getUpdateDefaults(): string {
+      let output = '';
+      states
+        .filter((s) => {
+          return s.name.includes('default_');
+        })
+        .map((s) => {
+          return {
+            name: s.name,
+            values: [
+              ...new Set([
+                getState(s.name) as string,
+                ...(s.acceptables || ['true', 'false'])
+              ])
+            ]
+          };
+        })
+        .map((s) => {
+          return {
+            name: s.name,
+            values: s.values.reduce((a, b) => {
+              return a + '|' + b;
+            })
+          };
+        })
+        .forEach((s) => {
+          const nameParts = s.name.split('_').slice(1);
+          const name =
+            nameParts
+              .map((s) => {
+                return s[0].toUpperCase() + s.slice(1);
+              })
+              .reduce((a, b) => {
+                return a + ' ' + b;
+              }) + '?';
+          output += '|?{' + name + '|' + s.values + '}';
+        });
+      return output;
     }
   }
 
@@ -246,7 +323,7 @@ const UsageTracker = (function() {
       if (['add'].includes(thisCommand)) {
         switch (thisCommand) {
           case 'add':
-            buttonForAddTracker(parts[1]);
+            handleAddTracker(msg);
             break;
           default:
             error('Command ' + code(msg.content) + ' not understood.', -1);
@@ -258,12 +335,60 @@ const UsageTracker = (function() {
     }
   }
 
-  // --new ?{Tracker Name}|?{Algorithm Type}'
-  function buttonForAddTracker(cmd: string): void {
-    const fullCommand = cmd.slice(cmd.indexOf(' '));
-    const commands = fullCommand.split('|');
-    const trackerName = commands[0];
-    const alogrithmType = commands[1];
+  // Example message:
+  // "!ut --add this name|notify|updateMethod|viewPerm|pauseAtLevel|createMacro"
+  function handleAddTracker(msg: ApiChatEventData) {
+    const createdTrackers: string[] = [];
+    const creator = msg.playerid;
+    const strings: string[][] = [];
+    msg.content.split('--').forEach((p, i) => {
+      if (i > 0) {
+        strings.push(p.slice(4).split('|'));
+      }
+    });
+    strings.forEach((s) => {
+      const name = s[0];
+      createdTrackers.push(name);
+      const notify = s[1];
+      const updateMethod = s[2];
+      const viewPerm = s[3];
+      const pauseAtLevel = s[4] == 'true';
+      const createdMacro = s[5] == 'true';
+      createTracker({
+        creator: creator,
+        name: name,
+        notify: notify,
+        updateMethod: updateMethod,
+        viewPerm: viewPerm,
+        pauseAtLevel: pauseAtLevel,
+        createdMacro: createdMacro
+      });
+    });
+    const trackersString = createdTrackers.reduce((a, b) => {
+      return a + ', ' + b;
+    });
+    toChat('Created ' + trackersString + ' tracker(s).', true);
+  }
+
+  function createTracker(TrackerObj: TrackerObject) {
+    if (getTracker(TrackerObj.name) == undefined) {
+      setTracker(TrackerObj);
+    } else {
+      error(
+        'A usage tracker named "' +
+          name +
+          '" already exists. Tracker creation cancelled.',
+        4
+      );
+    }
+  }
+
+  function getTracker(value: string) {
+    return state[stateName].tracker[value];
+  }
+
+  function setTracker(trackerObj: TrackerObject): void {
+    state[stateName].tracker[trackerObj.name] = trackerObj;
   }
 
   /**
@@ -318,7 +443,8 @@ const UsageTracker = (function() {
     return attr;
   }
 
-  // can also return a string in the case of "status_marker" StateVar, but is never checked by code
+  // can also return a string in the case of "status_marker" StateVar,
+  // but is never checked by code
   function getState(value: StateVar) {
     return state[stateName][value];
   }
